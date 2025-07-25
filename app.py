@@ -1,562 +1,484 @@
 # =============================================================================
-# FILE: app.py (Main Streamlit Application)
-# LOCATION: root/
+# File: app.py (Root directory)
+# PolicyPal - GenAI Compliance Navigator for Global Startups
 # =============================================================================
 
 import streamlit as st
 import requests
 import json
+import re
+from datetime import datetime
+from typing import Dict, List, Optional
 import base64
-from PIL import Image
-import io
-import pandas as pd
-from datetime import datetime, timedelta
-import random
-import time
-
-# Page configuration
-st.set_page_config(
-    page_title="🌾 AgroSage - AI Farming Assistant",
-    page_icon="🌾",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+from io import BytesIO
+import zipfile
 
 # =============================================================================
-# FILE: config.py (Configuration Settings)
-# LOCATION: root/
+# File: config/settings.py
+# Configuration and Constants
 # =============================================================================
 
-class Config:
-    # OpenRouter API Configuration
-    OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "")
-    OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
-    
-    # Model Configuration
-    MODEL_NAME = "mistralai/mistral-7b-instruct:free"
-    
-    # Supported Languages
-    LANGUAGES = {
-        "English": "en",
-        "हिंदी (Hindi)": "hi",
-        "मराठी (Marathi)": "mr",
-        "தமிழ் (Tamil)": "ta",
-        "বাংলা (Bengali)": "bn",
-        "ગુજરાતી (Gujarati)": "gu"
+# Jurisdiction-specific compliance frameworks
+JURISDICTIONS = {
+    "European Union": {
+        "primary_law": "GDPR",
+        "risk_factors": ["data_transfer", "consent_mechanism", "data_retention"],
+        "required_sections": ["data_controller", "legal_basis", "data_subject_rights", "dpo_contact"]
+    },
+    "United States": {
+        "primary_law": "CCPA/HIPAA",
+        "risk_factors": ["healthcare_data", "financial_data", "state_laws"],
+        "required_sections": ["privacy_notice", "opt_out_rights", "data_sale_disclosure"]
+    },
+    "India": {
+        "primary_law": "DPDP Act 2023",
+        "risk_factors": ["consent_management", "cross_border_transfer", "data_localization"],
+        "required_sections": ["data_fiduciary", "consent_notice", "grievance_officer"]
+    },
+    "United Kingdom": {
+        "primary_law": "UK GDPR",
+        "risk_factors": ["post_brexit_adequacy", "ico_compliance", "data_transfer"],
+        "required_sections": ["lawful_basis", "data_protection_officer", "breach_notification"]
     }
-    
-    # Indian States for Weather
-    STATES = [
-        "Andhra Pradesh", "Bihar", "Gujarat", "Haryana", "Karnataka",
-        "Madhya Pradesh", "Maharashtra", "Punjab", "Rajasthan", "Tamil Nadu",
-        "Uttar Pradesh", "West Bengal"
-    ]
+}
+
+BUSINESS_TYPES = {
+    "SaaS Platform": ["user_data", "payment_processing", "analytics"],
+    "E-commerce": ["customer_data", "payment_processing", "marketing", "shipping"],
+    "HealthTech": ["health_data", "hipaa_compliance", "patient_records"],
+    "FinTech": ["financial_data", "pci_compliance", "transaction_records"],
+    "EdTech": ["student_data", "coppa_compliance", "learning_analytics"],
+    "IoT/Hardware": ["device_data", "location_tracking", "sensor_data"]
+}
 
 # =============================================================================
-# FILE: utils/llm_handler.py (LLM API Handler)
-# LOCATION: utils/
+# File: utils/llm_client.py
+# OpenRouter LLM Integration
 # =============================================================================
 
-class LLMHandler:
-    def __init__(self, api_key):
+class LLMClient:
+    def __init__(self, api_key: str):
         self.api_key = api_key
-        self.base_url = Config.OPENROUTER_BASE_URL
-    
-    def get_response(self, prompt, language="English"):
-        """Get response from OpenRouter API"""
-        if not self.api_key:
-            return "⚠️ Please configure OpenRouter API key in Streamlit secrets"
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
+        self.base_url = "https://openrouter.ai/api/v1/chat/completions"
+        self.headers = {
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
-        
-        system_prompt = f"""You are AgroSage, an expert agricultural assistant for Indian farmers. 
-        Respond in {language} language. Provide practical, actionable advice specific to Indian farming conditions.
-        Keep responses concise but informative. Include local context and traditional knowledge when relevant."""
-        
-        payload = {
-            "model": Config.MODEL_NAME,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 500,
-            "temperature": 0.7
-        }
-        
+    
+    def generate_response(self, messages: List[Dict], model: str = "anthropic/claude-3-haiku") -> str:
+        """Generate response using OpenRouter API"""
         try:
-            response = requests.post(self.base_url, headers=headers, json=payload, timeout=30)
-            if response.status_code == 200:
-                return response.json()["choices"][0]["message"]["content"]
-            else:
-                return f"Error: {response.status_code} - {response.text}"
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.7,
+                "max_tokens": 4000
+            }
+            
+            response = requests.post(self.base_url, headers=self.headers, json=payload)
+            response.raise_for_status()
+            
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+        
         except Exception as e:
-            return f"Connection error: {str(e)}"
+            st.error(f"LLM API Error: {str(e)}")
+            return "Error generating response. Please check your API key and try again."
 
 # =============================================================================
-# FILE: utils/knowledge_base.py (Simulated Knowledge Base)
-# LOCATION: utils/
+# File: components/policy_generator.py
+# Core Policy Generation Logic
 # =============================================================================
 
-class KnowledgeBase:
-    """Simulated RAG system with Indian agricultural knowledge"""
+class PolicyGenerator:
+    def __init__(self, llm_client: LLMClient):
+        self.llm_client = llm_client
     
-    @staticmethod
-    def get_crop_info(crop_name, state=""):
-        """Get crop-specific information"""
-        crop_db = {
-            "rice": {
-                "best_season": "Kharif (June-November)",
-                "water_requirement": "1200-1500mm",
-                "soil_type": "Clay loam, well-drained",
-                "fertilizer": "NPK 120:60:40 kg/ha",
-                "pests": ["Brown planthopper", "Stem borer", "Leaf folder"]
-            },
-            "wheat": {
-                "best_season": "Rabi (November-April)",
-                "water_requirement": "450-650mm",
-                "soil_type": "Well-drained loam",
-                "fertilizer": "NPK 120:60:40 kg/ha",
-                "pests": ["Aphids", "Termites", "Rust diseases"]
-            },
-            "cotton": {
-                "best_season": "Kharif (April-October)",
-                "water_requirement": "700-1300mm",
-                "soil_type": "Black cotton soil",
-                "fertilizer": "NPK 100:50:50 kg/ha",
-                "pests": ["Bollworm", "Aphids", "Whitefly"]
-            },
-            "sugarcane": {
-                "best_season": "Year-round",
-                "water_requirement": "1800-2500mm",
-                "soil_type": "Deep, well-drained soil",
-                "fertilizer": "NPK 300:75:75 kg/ha",
-                "pests": ["Early shoot borer", "Root borer", "Scale insects"]
-            }
-        }
+    def generate_privacy_policy(self, jurisdiction: str, business_type: str, 
+                              company_details: Dict, data_practices: Dict) -> str:
+        """Generate comprehensive privacy policy"""
         
-        return crop_db.get(crop_name.lower(), {
-            "message": "Crop information not found. Please consult local agricultural extension officer."
-        })
-    
-    @staticmethod
-    def get_government_schemes():
-        """Get information about government schemes"""
-        schemes = [
-            {
-                "name": "PM-KISAN",
-                "description": "₹6000 per year direct income support",
-                "eligibility": "Small and marginal farmers"
-            },
-            {
-                "name": "Pradhan Mantri Fasal Bima Yojana",
-                "description": "Crop insurance against natural calamities",
-                "eligibility": "All farmers"
-            },
-            {
-                "name": "Kisan Credit Card",
-                "description": "Easy access to credit for farming needs",
-                "eligibility": "All farmers with land documents"
-            },
-            {
-                "name": "Soil Health Card",
-                "description": "Free soil testing and nutrient recommendations",
-                "eligibility": "All farmers"
-            }
-        ]
-        return schemes
-    
-    @staticmethod
-    def get_market_prices():
-        """Simulated market prices (in real app, would connect to AgriPortal API)"""
-        crops = ["Rice", "Wheat", "Cotton", "Sugarcane", "Onion", "Potato", "Tomato"]
-        prices = []
+        jurisdiction_info = JURISDICTIONS.get(jurisdiction, {})
+        business_info = BUSINESS_TYPES.get(business_type, [])
         
-        for crop in crops:
-            base_price = random.randint(1500, 5000)
-            prices.append({
-                "crop": crop,
-                "price": f"₹{base_price}/quintal",
-                "market": "Mandal Average",
-                "trend": random.choice(["📈 Rising", "📉 Falling", "➖ Stable"])
-            })
+        prompt = f"""
+        Generate a comprehensive privacy policy for a {business_type} startup operating in {jurisdiction}.
         
-        return prices
-
-# =============================================================================
-# FILE: utils/pest_classifier.py (Simulated Image Classification)
-# LOCATION: utils/
-# =============================================================================
-
-class PestClassifier:
-    """Simulated pest/disease classification"""
-    
-    @staticmethod
-    def classify_image(image):
-        """Simulate pest/disease classification"""
-        # In real implementation, this would use a trained CNN model
-        pests = [
-            {
-                "name": "Brown Planthopper",
-                "confidence": 0.85,
-                "crop": "Rice",
-                "treatment": "Use Imidacloprid 17.8% SL @ 100ml/acre",
-                "organic_treatment": "Neem oil spray, encourage natural predators"
-            },
-            {
-                "name": "Aphids",
-                "confidence": 0.78,
-                "crop": "Multiple crops",
-                "treatment": "Thiamethoxam 25% WG @ 100g/acre",
-                "organic_treatment": "Soap water spray, ladybird beetles"
-            },
-            {
-                "name": "Leaf Blight",
-                "confidence": 0.72,
-                "crop": "Wheat",
-                "treatment": "Propiconazole 25% EC @ 250ml/acre",
-                "organic_treatment": "Copper fungicide, proper spacing"
-            }
+        Company Details:
+        - Company Name: {company_details.get('name', 'Your Company')}
+        - Website: {company_details.get('website', 'yourcompany.com')}
+        - Contact Email: {company_details.get('email', 'privacy@yourcompany.com')}
+        - Address: {company_details.get('address', 'Company Address')}
+        
+        Data Practices:
+        - Data Collection: {data_practices.get('collection', [])}
+        - Data Usage: {data_practices.get('usage', [])}
+        - Third-party Sharing: {data_practices.get('sharing', 'No')}
+        - Data Retention: {data_practices.get('retention', '12 months')}
+        - Cookies Used: {data_practices.get('cookies', 'Essential only')}
+        
+        Legal Framework: {jurisdiction_info.get('primary_law', 'General Privacy Laws')}
+        Required Sections: {jurisdiction_info.get('required_sections', [])}
+        
+        Generate a complete, legally-compliant privacy policy with:
+        1. Clear, plain language explanations
+        2. All required sections for {jurisdiction}
+        3. Specific clauses for {business_type} businesses
+        4. Contact information and grievance procedures
+        5. Data subject rights and procedures
+        
+        Format the output in clean markdown with proper headers and sections.
+        """
+        
+        messages = [
+            {"role": "system", "content": "You are a legal compliance expert specializing in privacy laws. Generate accurate, comprehensive privacy policies that comply with local regulations."},
+            {"role": "user", "content": prompt}
         ]
         
-        return random.choice(pests)
-
-# =============================================================================
-# FILE: utils/weather_service.py (Weather Information)
-# LOCATION: utils/
-# =============================================================================
-
-class WeatherService:
-    """Simulated weather service"""
+        return self.llm_client.generate_response(messages)
     
+    def generate_cookie_banner(self, jurisdiction: str, cookie_types: List[str]) -> str:
+        """Generate cookie banner content"""
+        
+        prompt = f"""
+        Generate a cookie banner/notice for a website operating in {jurisdiction}.
+        
+        Cookie Types Used:
+        {', '.join(cookie_types)}
+        
+        Requirements:
+        - Compliant with {JURISDICTIONS.get(jurisdiction, {}).get('primary_law', 'privacy laws')}
+        - Clear consent mechanism
+        - Easy opt-out options
+        - Mobile-friendly text
+        
+        Provide both the banner text and technical implementation guidance.
+        """
+        
+        messages = [
+            {"role": "system", "content": "You are a privacy compliance expert. Generate user-friendly cookie notices that meet legal requirements."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        return self.llm_client.generate_response(messages)
+    
+    def assess_compliance_risk(self, jurisdiction: str, business_type: str, 
+                             data_practices: Dict) -> Dict:
+        """Assess compliance risk level"""
+        
+        risk_factors = JURISDICTIONS.get(jurisdiction, {}).get('risk_factors', [])
+        business_risks = BUSINESS_TYPES.get(business_type, [])
+        
+        prompt = f"""
+        Assess the privacy compliance risk for a {business_type} operating in {jurisdiction}.
+        
+        Data Practices:
+        {json.dumps(data_practices, indent=2)}
+        
+        Key Risk Factors for {jurisdiction}:
+        {', '.join(risk_factors)}
+        
+        Business-Specific Risks:
+        {', '.join(business_risks)}
+        
+        Provide:
+        1. Overall Risk Level (Low/Medium/High)
+        2. Top 3 specific risk areas
+        3. Immediate action items
+        4. Compliance timeline recommendations
+        
+        Format as JSON with clear structure.
+        """
+        
+        messages = [
+            {"role": "system", "content": "You are a privacy risk assessment expert. Provide accurate risk evaluations and actionable recommendations."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        response = self.llm_client.generate_response(messages)
+        
+        # Parse JSON response or return structured fallback
+        try:
+            return json.loads(response)
+        except:
+            return {
+                "risk_level": "Medium",
+                "risk_areas": ["Data retention policies", "Consent mechanisms", "Third-party integrations"],
+                "action_items": ["Review data retention", "Implement consent management", "Audit third-party services"],
+                "timeline": "3-6 months for full compliance"
+            }
+
+# =============================================================================
+# File: components/document_exporter.py
+# Document Export Functionality
+# =============================================================================
+
+class DocumentExporter:
     @staticmethod
-    def get_weather_forecast(state):
-        """Get weather forecast for farming decisions"""
-        weather_conditions = ["Sunny", "Partly Cloudy", "Rainy", "Thunderstorm"]
-        forecast = []
+    def create_download_package(documents: Dict[str, str], company_name: str) -> BytesIO:
+        """Create a ZIP file with all generated documents"""
+        zip_buffer = BytesIO()
         
-        for i in range(5):
-            date = datetime.now() + timedelta(days=i)
-            forecast.append({
-                "date": date.strftime("%Y-%m-%d"),
-                "condition": random.choice(weather_conditions),
-                "temp_max": random.randint(25, 40),
-                "temp_min": random.randint(15, 25),
-                "humidity": random.randint(40, 90),
-                "rainfall": random.randint(0, 50) if random.choice([True, False]) else 0
-            })
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            for doc_name, content in documents.items():
+                # Clean filename
+                filename = f"{doc_name.lower().replace(' ', '_')}.md"
+                zip_file.writestr(filename, content)
+            
+            # Add a README
+            readme_content = f"""
+# {company_name} - Privacy Compliance Package
+
+Generated on: {datetime.now().strftime("%B %d, %Y")}
+
+## Contents:
+{chr(10).join([f"- {name}" for name in documents.keys()])}
+
+## Next Steps:
+1. Review all documents with legal counsel
+2. Customize placeholder content
+3. Implement technical requirements
+4. Test consent mechanisms
+5. Train your team on privacy procedures
+
+## Disclaimer:
+These documents are generated for informational purposes. 
+Please consult with qualified legal counsel before implementation.
+"""
+            zip_file.writestr("README.md", readme_content)
         
-        return forecast
-    
-    @staticmethod
-    def get_farming_advice(forecast):
-        """Get farming advice based on weather"""
-        advice = []
-        
-        for day in forecast:
-            if day["rainfall"] > 20:
-                advice.append("Heavy rainfall expected. Avoid spraying pesticides.")
-            elif day["temp_max"] > 35:
-                advice.append("High temperature. Increase irrigation frequency.")
-            elif day["humidity"] > 80:
-                advice.append("High humidity. Monitor for fungal diseases.")
-            else:
-                advice.append("Good weather for field operations.")
-        
-        return advice
+        zip_buffer.seek(0)
+        return zip_buffer
 
 # =============================================================================
-# FILE: components/sidebar.py (Sidebar Components)
-# LOCATION: components/
+# File: main.py (Streamlit App)
+# Main Application Interface
 # =============================================================================
 
-def render_sidebar():
-    """Render sidebar with user preferences"""
-    st.sidebar.title("🌾 AgroSage Settings")
-    
-    # Language Selection
-    selected_language = st.sidebar.selectbox(
-        "🗣️ Select Language",
-        list(Config.LANGUAGES.keys()),
-        index=0
-    )
-    
-    # State Selection
-    selected_state = st.sidebar.selectbox(
-        "📍 Select State",
-        Config.STATES,
-        index=5  # Default to Madhya Pradesh
-    )
-    
-    # User Profile
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("👨‍🌾 **Farmer Profile**")
-    farm_size = st.sidebar.slider("Farm Size (acres)", 1, 100, 5)
-    farming_type = st.sidebar.radio("Farming Type", ["Organic", "Conventional", "Mixed"])
-    
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("📱 **Quick Actions**")
-    if st.sidebar.button("🆘 Emergency Helpline"):
-        st.sidebar.success("Kisan Call Center: 1800-180-1551")
-    
-    return selected_language, selected_state, farm_size, farming_type
-
-# =============================================================================
-# FILE: components/chat_interface.py (Chat Interface)
-# LOCATION: components/
-# =============================================================================
-
-def render_chat_interface(llm_handler, language):
-    """Render chat interface"""
-    st.header("💬 Ask AgroSage")
-    
-    # Initialize chat history
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    
-    # Chat input
-    user_input = st.chat_input("Ask your farming question...")
-    
-    if user_input:
-        # Add user message to chat history
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        # Get AI response
-        with st.spinner("AgroSage is thinking..."):
-            response = llm_handler.get_response(user_input, language)
-        
-        # Add AI response to chat history
-        st.session_state.messages.append({"role": "assistant", "content": response})
-    
-    # Display chat history
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.write(message["content"])
-
-# =============================================================================
-# FILE: components/image_diagnosis.py (Image Diagnosis Interface)
-# LOCATION: components/
-# =============================================================================
-
-def render_image_diagnosis():
-    """Render image diagnosis interface"""
-    st.header("📸 Pest & Disease Diagnosis")
-    
-    uploaded_file = st.file_uploader(
-        "Upload crop/leaf image for diagnosis",
-        type=['png', 'jpg', 'jpeg'],
-        help="Take a clear photo of affected plant parts"
-    )
-    
-    if uploaded_file is not None:
-        # Display uploaded image
-        image = Image.open(uploaded_file)
-        col1, col2 = st.columns([1, 2])
-        
-        with col1:
-            st.image(image, caption="Uploaded Image", use_container_width=True)
-        
-        with col2:
-            with st.spinner("Analyzing image..."):
-                # Simulate analysis delay
-                time.sleep(2)
-                
-                # Get classification result
-                result = PestClassifier.classify_image(image)
-                
-                st.success(f"**Detected:** {result['name']}")
-                st.info(f"**Confidence:** {result['confidence']:.0%}")
-                st.write(f"**Affected Crop:** {result['crop']}")
-                
-                st.markdown("### 💊 Treatment Recommendations")
-                st.write(f"**Chemical:** {result['treatment']}")
-                st.write(f"**Organic:** {result['organic_treatment']}")
-                
-                # Additional advice
-                st.markdown("### 📋 Additional Advice")
-                st.write("• Apply treatment during early morning or evening")
-                st.write("• Maintain proper field sanitation")
-                st.write("• Monitor regularly for re-infestation")
-
-# =============================================================================
-# FILE: components/weather_dashboard.py (Weather Dashboard)
-# LOCATION: components/
-# =============================================================================
-
-def render_weather_dashboard(state):
-    """Render weather dashboard"""
-    st.header(f"🌤️ Weather Forecast - {state}")
-    
-    # Get weather data
-    forecast = WeatherService.get_weather_forecast(state)
-    advice = WeatherService.get_farming_advice(forecast)
-    
-    # Display forecast
-    cols = st.columns(5)
-    for i, day in enumerate(forecast):
-        with cols[i]:
-            st.metric(
-                label=day["date"],
-                value=f"{day['temp_max']}°C",
-                delta=f"{day['temp_min']}°C min"
-            )
-            st.write(f"🌧️ {day['rainfall']}mm")
-            st.write(f"💧 {day['humidity']}% RH")
-    
-    # Farming advice
-    st.markdown("### 🌾 Weather-based Farming Advice")
-    for i, tip in enumerate(advice):
-        st.write(f"{i+1}. {tip}")
-
-# =============================================================================
-# FILE: components/market_info.py (Market Information)
-# LOCATION: components/
-# =============================================================================
-
-def render_market_info():
-    """Render market information"""
-    st.header("💰 Market Prices")
-    
-    prices = KnowledgeBase.get_market_prices()
-    
-    # Create DataFrame for better display
-    df = pd.DataFrame(prices)
-    
-    # Display as styled table
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True
-    )
-    
-    # Price alerts
-    st.markdown("### 🔔 Price Alerts")
-    selected_crop = st.selectbox("Select crop for price alerts", [p["crop"] for p in prices])
-    target_price = st.number_input("Target price (₹/quintal)", min_value=1000, value=3000)
-    
-    if st.button("Set Price Alert"):
-        st.success(f"Price alert set for {selected_crop} at ₹{target_price}/quintal")
-
-# =============================================================================
-# FILE: components/government_schemes.py (Government Schemes)
-# LOCATION: components/
-# =============================================================================
-
-def render_government_schemes():
-    """Render government schemes information"""
-    st.header("🏛️ Government Schemes")
-    
-    schemes = KnowledgeBase.get_government_schemes()
-    
-    for scheme in schemes:
-        with st.expander(f"📋 {scheme['name']}"):
-            st.write(f"**Description:** {scheme['description']}")
-            st.write(f"**Eligibility:** {scheme['eligibility']}")
-            st.button(f"Apply for {scheme['name']}", key=f"apply_{scheme['name']}")
-
-# =============================================================================
-# FILE: main.py (Main Application Logic)
-# LOCATION: root/
-# =============================================================================
+def initialize_session_state():
+    """Initialize session state variables"""
+    if 'documents' not in st.session_state:
+        st.session_state.documents = {}
+    if 'risk_assessment' not in st.session_state:
+        st.session_state.risk_assessment = {}
 
 def main():
-    """Main application function"""
+    st.set_page_config(
+        page_title="PolicyPal - AI Compliance Navigator",
+        page_icon="🛡️",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
     
-    # Custom CSS
-    st.markdown("""
-    <style>
-    .main-header {
-        text-align: center;
-        color: #2E8B57;
-        font-size: 3rem;
-        margin-bottom: 2rem;
-    }
-    .feature-card {
-        background: linear-gradient(45deg, #f0f8f0, #e8f5e8);
-        padding: 1rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-        border-left: 4px solid #2E8B57;
-    }
-    .stButton > button {
-        background: linear-gradient(45deg, #2E8B57, #228B22);
-        color: white;
-        border: none;
-        border-radius: 5px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    initialize_session_state()
     
     # Header
-    st.markdown('<h1 class="main-header">🌾 AgroSage - AI Farming Assistant</h1>', unsafe_allow_html=True)
-    st.markdown("**Empowering Indian Farmers with AI-driven Agricultural Intelligence**")
+    st.title("🛡️ PolicyPal")
+    st.subheader("AI-Powered Compliance Navigator for Global Startups")
+    st.markdown("---")
     
-    # Sidebar
-    language, state, farm_size, farming_type = render_sidebar()
+    # Sidebar Configuration
+    st.sidebar.header("⚙️ Configuration")
     
-    # Initialize LLM Handler
-    llm_handler = LLMHandler(Config.OPENROUTER_API_KEY)
+    # API Key Input
+    api_key = st.sidebar.text_input(
+        "OpenRouter API Key",
+        type="password",
+        help="Get your free API key from openrouter.ai"
+    )
     
-    # Main Navigation
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "💬 Chat Assistant", 
-        "📸 Pest Diagnosis", 
-        "🌤️ Weather", 
-        "💰 Market Prices", 
-        "🏛️ Govt Schemes",
-        "📚 Crop Guide"
-    ])
+    if not api_key:
+        st.warning("Please enter your OpenRouter API key in the sidebar to continue.")
+        st.info("🔗 Get your free API key at [openrouter.ai](https://openrouter.ai)")
+        return
     
-    with tab1:
-        render_chat_interface(llm_handler, language)
+    # Initialize clients
+    llm_client = LLMClient(api_key)
+    policy_generator = PolicyGenerator(llm_client)
     
-    with tab2:
-        render_image_diagnosis()
+    # Main Configuration
+    col1, col2 = st.columns(2)
     
-    with tab3:
-        render_weather_dashboard(state)
-    
-    with tab4:
-        render_market_info()
-    
-    with tab5:
-        render_government_schemes()
-    
-    with tab6:
-        st.header("📚 Crop Information Guide")
-        crop_name = st.selectbox("Select Crop", ["Rice", "Wheat", "Cotton", "Sugarcane"])
+    with col1:
+        st.header("🌍 Business Details")
         
-        if crop_name:
-            crop_info = KnowledgeBase.get_crop_info(crop_name, state)
+        jurisdiction = st.selectbox(
+            "Operating Jurisdiction",
+            list(JURISDICTIONS.keys()),
+            help="Primary jurisdiction where your business operates"
+        )
+        
+        business_type = st.selectbox(
+            "Business Type",
+            list(BUSINESS_TYPES.keys()),
+            help="Your primary business model"
+        )
+        
+        # Company Details
+        with st.expander("Company Information"):
+            company_name = st.text_input("Company Name", value="Your Startup Inc.")
+            website = st.text_input("Website", value="yourcompany.com")
+            email = st.text_input("Privacy Contact Email", value="privacy@yourcompany.com")
+            address = st.text_area("Business Address", value="123 Business St, City, Country")
+    
+    with col2:
+        st.header("📊 Data Practices")
+        
+        # Data Collection
+        data_collection = st.multiselect(
+            "What data do you collect?",
+            ["Email addresses", "Names", "Phone numbers", "Location data", 
+             "Payment information", "Usage analytics", "Device information", 
+             "Health data", "Financial data", "Biometric data"],
+            default=["Email addresses", "Usage analytics"]
+        )
+        
+        # Data Usage
+        data_usage = st.multiselect(
+            "How do you use this data?",
+            ["Service provision", "Marketing", "Analytics", "Customer support",
+             "Legal compliance", "Security", "Product improvement", "Research"],
+            default=["Service provision", "Analytics"]
+        )
+        
+        # Additional practices
+        third_party_sharing = st.radio(
+            "Do you share data with third parties?",
+            ["No", "Yes - Service providers only", "Yes - Marketing partners", "Yes - Data brokers"]
+        )
+        
+        data_retention = st.selectbox(
+            "Data retention period",
+            ["6 months", "12 months", "24 months", "As long as legally required", "Indefinitely"]
+        )
+        
+        cookie_types = st.multiselect(
+            "Cookie types used",
+            ["Essential", "Analytics", "Marketing", "Personalization", "Social media"],
+            default=["Essential", "Analytics"]
+        )
+    
+    # Generate Documents
+    st.markdown("---")
+    st.header("📄 Generate Compliance Documents")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    company_details = {
+        'name': company_name,
+        'website': website,
+        'email': email,
+        'address': address
+    }
+    
+    data_practices = {
+        'collection': data_collection,
+        'usage': data_usage,
+        'sharing': third_party_sharing,
+        'retention': data_retention,
+        'cookies': cookie_types
+    }
+    
+    with col1:
+        if st.button("📋 Generate Privacy Policy", type="primary"):
+            with st.spinner("Generating privacy policy..."):
+                policy = policy_generator.generate_privacy_policy(
+                    jurisdiction, business_type, company_details, data_practices
+                )
+                st.session_state.documents['Privacy Policy'] = policy
+    
+    with col2:
+        if st.button("🍪 Generate Cookie Banner", type="primary"):
+            with st.spinner("Generating cookie banner..."):
+                banner = policy_generator.generate_cookie_banner(jurisdiction, cookie_types)
+                st.session_state.documents['Cookie Banner'] = banner
+    
+    with col3:
+        if st.button("⚠️ Assess Compliance Risk", type="primary"):
+            with st.spinner("Assessing compliance risk..."):
+                risk = policy_generator.assess_compliance_risk(
+                    jurisdiction, business_type, data_practices
+                )
+                st.session_state.risk_assessment = risk
+    
+    # Display Results
+    if st.session_state.documents or st.session_state.risk_assessment:
+        st.markdown("---")
+        st.header("📊 Results")
+        
+        # Risk Assessment Display
+        if st.session_state.risk_assessment:
+            st.subheader("🎯 Compliance Risk Assessment")
             
-            if "message" not in crop_info:
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown("### 🌱 Growing Information")
-                    st.write(f"**Best Season:** {crop_info.get('best_season', 'N/A')}")
-                    st.write(f"**Water Requirement:** {crop_info.get('water_requirement', 'N/A')}")
-                    st.write(f"**Soil Type:** {crop_info.get('soil_type', 'N/A')}")
-                
-                with col2:
-                    st.markdown("### 🧪 Fertilizer & Pests")
-                    st.write(f"**Fertilizer:** {crop_info.get('fertilizer', 'N/A')}")
-                    st.write("**Common Pests:**")
-                    for pest in crop_info.get('pests', []):
-                        st.write(f"• {pest}")
-            else:
-                st.warning(crop_info["message"])
+            risk_data = st.session_state.risk_assessment
+            
+            # Risk level with color coding
+            risk_level = risk_data.get('risk_level', 'Medium')
+            risk_colors = {'Low': 'green', 'Medium': 'orange', 'High': 'red'}
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Risk Level", risk_level, delta=None)
+                st.markdown(f"<span style='color: {risk_colors.get(risk_level, 'gray')}'>{risk_level} Risk</span>", 
+                           unsafe_allow_html=True)
+            
+            with col2:
+                st.write("**Top Risk Areas:**")
+                for area in risk_data.get('risk_areas', [])[:3]:
+                    st.write(f"• {area}")
+            
+            with col3:
+                st.write("**Action Items:**")
+                for item in risk_data.get('action_items', [])[:3]:
+                    st.write(f"• {item}")
+            
+            if 'timeline' in risk_data:
+                st.info(f"**Recommended Timeline:** {risk_data['timeline']}")
+        
+        # Documents Display
+        for doc_name, content in st.session_state.documents.items():
+            st.subheader(f"📄 {doc_name}")
+            
+            # Display content in expandable section
+            with st.expander(f"View {doc_name}", expanded=False):
+                st.markdown(content)
+            
+            # Download individual document
+            st.download_button(
+                label=f"📥 Download {doc_name}",
+                data=content,
+                file_name=f"{doc_name.lower().replace(' ', '_')}.md",
+                mime="text/markdown"
+            )
+        
+        # Download All Documents
+        if st.session_state.documents:
+            st.markdown("---")
+            
+            # Create download package
+            documents_package = DocumentExporter.create_download_package(
+                st.session_state.documents, 
+                company_name
+            )
+            
+            st.download_button(
+                label="📦 Download Complete Compliance Package",
+                data=documents_package.getvalue(),
+                file_name=f"{company_name.lower().replace(' ', '_')}_compliance_package.zip",
+                mime="application/zip",
+                type="primary"
+            )
     
     # Footer
     st.markdown("---")
     st.markdown("""
-    <div style='text-align: center; color: #666; padding: 1rem;'>
-        <p>🌾 AgroSage - Built with ❤️ for Indian Farmers</p>
-        <p>📞 Helpline: 1800-180-1551 | 🌐 Digital India Initiative</p>
+    <div style='text-align: center; color: #666;'>
+        <p>🛡️ PolicyPal - Built with ❤️ for startup compliance</p>
+        <p><small>⚠️ Disclaimer: Generated documents are for informational purposes. 
+        Please consult qualified legal counsel before implementation.</small></p>
     </div>
     """, unsafe_allow_html=True)
-    
+
 if __name__ == "__main__":
     main()
